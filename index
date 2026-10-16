@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>Kokosnuss-Sammler</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; overflow: hidden; font-family: Arial, sans-serif; }
+    canvas { display: block; }
+    #hud {
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 40px; align-items: center;
+      background: rgba(0,0,0,0.5); padding: 10px 30px; border-radius: 40px;
+      color: white; font-size: 1.2rem; user-select: none;
+    }
+    #overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      color: white; text-align: center;
+    }
+    #overlay h1 { font-size: 2.5rem; margin-bottom: 1rem; }
+    #overlay p  { font-size: 1.1rem; margin-bottom: 2rem; color: #ccc; }
+    #overlay button {
+      padding: 14px 40px; font-size: 1.2rem; border: none; border-radius: 30px;
+      background: #e9c46a; color: #1a1a2e; font-weight: bold; cursor: pointer;
+    }
+    #overlay button:hover { background: #f4a261; }
+  </style>
+</head>
+<body>
+
+<div id="hud">
+  <span>🥥 <span id="score">0</span> / 10</span>
+  <span>⏱️ <span id="timer">30</span>s</span>
+  <span>❤️ <span id="lives">3</span></span>
+</div>
+
+<div id="overlay">
+  <h1>🥥 Kokosnuss-Sammler</h1>
+  <p>Sammle 10 Kokosnüsse, bevor die Zeit abläuft!<br/>
+     Weiche roten Bomben aus – sie kosten ein Leben.<br/><br/>
+     <strong>Steuerung:</strong> W A S D oder Pfeiltasten</p>
+  <button id="startBtn">Spiel starten</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script>
+// ─── Setup ───────────────────────────────────────────────────────────────────
+const scene    = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb); // Himmelblau
+scene.fog = new THREE.Fog(0x87ceeb, 20, 60);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 8, 14);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─── Licht ───────────────────────────────────────────────────────────────────
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.position.set(10, 20, 10);
+sun.castShadow = true;
+scene.add(sun);
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+// ─── Boden ───────────────────────────────────────────────────────────────────
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(40, 40),
+  new THREE.MeshStandardMaterial({ color: 0xf5deb3 }) // Sand
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Palmen-Deko
+function makePalm(x, z) {
+  const trunk = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.15, 0.2, 3, 8),
+    new THREE.MeshStandardMaterial({ color: 0x8B5E3C })
+  );
+  trunk.position.set(x, 1.5, z);
+  trunk.castShadow = true;
+  scene.add(trunk);
+
+  const top = new THREE.Mesh(
+    new THREE.SphereGeometry(1.2, 8, 8),
+    new THREE.MeshStandardMaterial({ color: 0x228B22 })
+  );
+  top.position.set(x, 3.4, z);
+  scene.add(top);
+}
+[[-8,- 8],[8,-8],[-8,8],[8,8],[-14,0],[14,0],[0,14],[0,-14]].forEach(([x,z]) => makePalm(x,z));
+
+// ─── Spieler ─────────────────────────────────────────────────────────────────
+const playerGroup = new THREE.Group();
+scene.add(playerGroup);
+
+// Körper
+const body = new THREE.Mesh(
+  new THREE.CapsuleGeometry(0.4, 0.8, 8, 16),
+  new THREE.MeshStandardMaterial({ color: 0xf4a261 })
+);
+body.position.y = 0.9;
+body.castShadow = true;
+playerGroup.add(body);
+
+// Kopf
+const head = new THREE.Mesh(
+  new THREE.SphereGeometry(0.35, 16, 16),
+  new THREE.MeshStandardMaterial({ color: 0xffe0bd })
+);
+head.position.y = 1.9;
+head.castShadow = true;
+playerGroup.add(head);
+
+// Strohhut
+const brim = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.6, 0.6, 0.07, 16),
+  new THREE.MeshStandardMaterial({ color: 0xe9c46a })
+);
+brim.position.y = 2.15;
+playerGroup.add(brim);
+const crown = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.3, 0.35, 0.3, 16),
+  new THREE.MeshStandardMaterial({ color: 0xe9c46a })
+);
+crown.position.y = 2.35;
+playerGroup.add(crown);
+
+playerGroup.position.set(0, 0, 0);
+
+// ─── Spielobjekte ─────────────────────────────────────────────────────────────
+const FIELD = 14;
+const coconuts = [];
+const bombs    = [];
+
+function randPos() {
+  return [(Math.random() - 0.5) * FIELD * 2, (Math.random() - 0.5) * FIELD * 2];
+}
+
+function makeCoconut() {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.4, 12, 12),
+    new THREE.MeshStandardMaterial({ color: 0x5C3317, roughness: 0.9 })
+  );
+  const [x, z] = randPos();
+  mesh.position.set(x, 0.4, z);
+  mesh.castShadow = true;
+  scene.add(mesh);
+
+  // kleiner Glanzpunkt
+  const shine = new THREE.Mesh(
+    new THREE.SphereGeometry(0.08, 6, 6),
+    new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff })
+  );
+  shine.position.set(x + 0.15, 0.65, z - 0.1);
+  scene.add(shine);
+  coconuts.push({ mesh, shine });
+}
+
+function makeBomb() {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.45, 12, 12),
+    new THREE.MeshStandardMaterial({ color: 0xe63946, emissive: 0x660000 })
+  );
+  const [x, z] = randPos();
+  mesh.position.set(x, 0.45, z);
+  mesh.castShadow = true;
+  scene.add(mesh);
+
+  // Zündschnur
+  const fuse = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.03, 0.03, 0.4, 6),
+    new THREE.MeshStandardMaterial({ color: 0x333333 })
+  );
+  fuse.position.set(x, 0.95, z);
+  scene.add(fuse);
+
+  // Bewegungsrichtung
+  const angle = Math.random() * Math.PI * 2;
+  const speed = 0.03 + Math.random() * 0.03;
+  bombs.push({ mesh, fuse, vx: Math.cos(angle) * speed, vz: Math.sin(angle) * speed });
+}
+
+// ─── Spielzustand ─────────────────────────────────────────────────────────────
+let score = 0, lives = 3, timeLeft = 30;
+let running = false;
+let invincible = false; // kurze Unverwundbarkeit nach Treffer
+
+const keys = {};
+window.addEventListener('keydown', e => keys[e.key] = true);
+window.addEventListener('keyup',   e => keys[e.key] = false);
+
+const scoreEl  = document.getElementById('score');
+const timerEl  = document.getElementById('timer');
+const livesEl  = document.getElementById('lives');
+const overlay  = document.getElementById('overlay');
+const startBtn = document.getElementById('startBtn');
+
+function startGame() {
+  // Reset
+  score = 0; lives = 3; timeLeft = 30;
+  running = true; invincible = false;
+  scoreEl.textContent = '0';
+  timerEl.textContent = '30';
+  livesEl.textContent = '3';
+  overlay.style.display = 'none';
+  playerGroup.position.set(0, 0, 0);
+
+  // Alte Objekte entfernen
+  [...coconuts, ...bombs].forEach(o => {
+    scene.remove(o.mesh);
+    if (o.shine) scene.remove(o.shine);
+    if (o.fuse)  scene.remove(o.fuse);
+  });
+  coconuts.length = 0;
+  bombs.length    = 0;
+
+  // Neue spawnen
+  for (let i = 0; i < 6; i++) makeCoconut();
+  for (let i = 0; i < 3; i++) makeBomb();
+
+  // Timer
+  clearInterval(window._timer);
+  window._timer = setInterval(() => {
+    if (!running) return;
+    timeLeft--;
+    timerEl.textContent = timeLeft;
+    if (timeLeft <= 0) endGame(false);
+  }, 1000);
+}
+
+function endGame(won) {
+  running = false;
+  clearInterval(window._timer);
+  const h1  = overlay.querySelector('h1');
+  const p   = overlay.querySelector('p');
+  h1.textContent  = won ? '🎉 Gewonnen!' : '💀 Game Over!';
+  p.innerHTML     = won
+    ? `Du hast alle 10 Kokosnüsse gesammelt!`
+    : `Die Zeit ist abgelaufen – du hattest ${score} Kokosnuss${score===1?'':'en'}.`;
+  startBtn.textContent = 'Nochmal spielen';
+  overlay.style.display = 'flex';
+}
+
+startBtn.addEventListener('click', startGame);
+
+// ─── Kollision ────────────────────────────────────────────────────────────────
+function dist2D(a, b) {
+  const dx = a.position.x - b.position.x;
+  const dz = a.position.z - b.position.z;
+  return Math.sqrt(dx*dx + dz*dz);
+}
+
+// ─── Animations-Loop ──────────────────────────────────────────────────────────
+const SPEED = 0.1;
+const clock  = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  if (running) {
+    // Spieler bewegen
+    let moved = false;
+    if (keys['ArrowLeft']  || keys['a'] || keys['A']) { playerGroup.position.x -= SPEED; playerGroup.rotation.y =  Math.PI/2; moved = true; }
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) { playerGroup.position.x += SPEED; playerGroup.rotation.y = -Math.PI/2; moved = true; }
+    if (keys['ArrowUp']    || keys['w'] || keys['W']) { playerGroup.position.z -= SPEED; playerGroup.rotation.y =  0;         moved = true; }
+    if (keys['ArrowDown']  || keys['s'] || keys['S']) { playerGroup.position.z += SPEED; playerGroup.rotation.y =  Math.PI;   moved = true; }
+
+    // Spielfeld begrenzen
+    playerGroup.position.x = Math.max(-FIELD, Math.min(FIELD, playerGroup.position.x));
+    playerGroup.position.z = Math.max(-FIELD, Math.min(FIELD, playerGroup.position.z));
+
+    // Laufanimation
+    if (moved) body.rotation.x = Math.sin(Date.now() * 0.015) * 0.15;
+
+    // Kamera folgt Spieler (sanft)
+    camera.position.x += (playerGroup.position.x - camera.position.x + 0) * 0.08;
+    camera.position.z += (playerGroup.position.z + 14  - camera.position.z) * 0.08;
+    camera.lookAt(playerGroup.position.x, 0, playerGroup.position.z);
+
+    // Kokosnüsse prüfen
+    for (let i = coconuts.length - 1; i >= 0; i--) {
+      const c = coconuts[i];
+      c.mesh.rotation.y += 0.02; // leicht rotieren
+      if (dist2D(playerGroup, c.mesh) < 1.0) {
+        scene.remove(c.mesh);
+        scene.remove(c.shine);
+        coconuts.splice(i, 1);
+        score++;
+        scoreEl.textContent = score;
+        makeCoconut(); // neue spawnen
+        if (score >= 10) endGame(true);
+      }
+    }
+
+    // Bomben bewegen & prüfen
+    bombs.forEach(b => {
+      b.mesh.position.x += b.vx;
+      b.mesh.position.z += b.vz;
+      b.fuse.position.x  = b.mesh.position.x;
+      b.fuse.position.z  = b.mesh.position.z;
+      b.mesh.rotation.y += 0.05;
+
+      // Bouncing an Feldgrenzen
+      if (Math.abs(b.mesh.position.x) > FIELD) b.vx *= -1;
+      if (Math.abs(b.mesh.position.z) > FIELD) b.vz *= -1;
+
+      // Treffer
+      if (!invincible && dist2D(playerGroup, b.mesh) < 0.9) {
+        lives--;
+        livesEl.textContent = lives;
+        invincible = true;
+        setTimeout(() => { invincible = false; }, 2000);
+        if (lives <= 0) endGame(false);
+      }
+
+      // Bomben blinken wenn nah
+      const d = dist2D(playerGroup, b.mesh);
+      b.mesh.material.emissiveIntensity = d < 3 ? 0.5 + Math.sin(Date.now()*0.01)*0.5 : 0;
+    });
+
+    // Spieler blinkt wenn unverwundbar
+    playerGroup.visible = invincible ? Math.sin(Date.now() * 0.02) > 0 : true;
+  }
+
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
